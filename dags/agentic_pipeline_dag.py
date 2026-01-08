@@ -1,3 +1,10 @@
+import sys
+import os
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import itertools
 import json
 import os
@@ -6,6 +13,9 @@ from datetime import timedelta, datetime
 
 from airflow.sdk import dag, task, Param, get_current_context
 import logging
+
+from core.healing_engine import heal_review
+from core.sentiment_engine import OllamaSentimentEngine
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +211,14 @@ def _analyze_with_ollama(healed_reviews: list[dict], model_info: dict) -> list[d
     model_name = model_info.get('model_name')
     ollama_host = model_info.get('ollama_host', Config.OLLAMA_HOST)
 
+    # 🔹NEW FEATURE 4: LLM Abstraction Layer
+    # The DAG interacts with an abstract sentiment engine interface
+    # instead of calling the Ollama client directly, allowing the LLM
+    # backend to be swapped without changing DAG logic.
+
+    engine = OllamaSentimentEngine(model_name, ollama_host)
+    logger.info(f"Using LLM engine: {engine.__class__.__name__}")
+
     try:
         client = ollama.Client(host=ollama_host)
     except Exception as e:
@@ -210,38 +228,42 @@ def _analyze_with_ollama(healed_reviews: list[dict], model_info: dict) -> list[d
     results = []
     total = len(healed_reviews)
 
+    # 🔹NEW FEATURE 3: Confidence-Aware Sentiment Output
+    # Raw model confidence scores are mapped into interpretable bands
+    # (HIGH / MEDIUM / LOW) to support downstream decision-making and monitoring.
+
+    def _confidence_band(score: float) -> str:
+        if score >= 0.85:
+            return "HIGH"
+        elif score >= 0.65:
+            return "MEDIUM"
+        return "LOW"
+
     for idx, review in enumerate(healed_reviews):
         text = review.get('healed_text', '')
         prediction = None
 
         for attempt in range(Config.OLLAMA_RETRIES):
             try:
-                prompt = f"""
-                    Analyze the sentiment of this review and classify it as POSITIVE, NEGATIVE, or NEUTRAL. 
-                    Review: "{text}"
-                    Reply with ONLY a JSON object: {{"sentiment": "POSITIVE", "confidence": 0.95}}.
-                    """
-
-                response = client.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={'temperature': 0.1},
-                )
-
-                response_text = response['message']['content'].strip()
-                prediction = _parse_ollama_response(response_text)
+                prediction = engine.analyze(text)
                 break
-
             except Exception as e:
                 if attempt < Config.OLLAMA_RETRIES - 1:
-                    logger.warning(f'Attempt {attempt+1} failed for review {review.get("review_id")}: {e}. Retrying...')
+                    logger.warning(
+                        f'Attempt {attempt + 1} failed for review {review.get("review_id")}: {e}'
+                    )
                     time.sleep(1)
                 else:
-                    logger.error(f'All attempts failed for review {review.get("review_id")}: {e}.')
-                    prediction = {'label': 'NEUTRAL', 'score': 0.5, 'error': str(e)}
+                    prediction = {'label': 'NEUTRAL', 'score': 0.5}
 
-        if (idx + 1) % 10 == 0 or (idx + 1) == total:
-            logger.info(f'Processed {idx + 1}/{total} reviews for sentiment analysis.')
+        # ✅ SAFE ZONE: pure JSON values only
+        confidence = round(float(prediction.get("score", 0.0)), 4)
+        confidence_band = _confidence_band(confidence)
+
+        # 🔹NEW FEATURE 2: Healing History Per Record
+        # Each review output explicitly records whether healing was applied,
+        # the detected error type, and the corrective action taken,
+        # enabling per-record auditability and traceability.
 
         results.append({
             'review_id': review.get('review_id'),
@@ -250,7 +272,8 @@ def _analyze_with_ollama(healed_reviews: list[dict], model_info: dict) -> list[d
             'text': review.get('healed_text', ''),
             'original_text': review.get('original_text', ''),
             'predicted_sentiment': prediction.get('label'),
-            'confidence': round(prediction.get('score'), 4),
+            'confidence': confidence,
+            'confidence_level': confidence_band,
             'status': 'healed' if review.get('was_healed') else 'success',
             'healing_applied': review.get('was_healed'),
             'healing_action': review.get('action_taken') if review.get('was_healed') else None,
@@ -324,12 +347,17 @@ def self_healing_pipeline():
         logger.info(f'Loading reviews with batch size {batch_size} and offset {offset}')
         return _load_from_file(params, batch_size, offset)
 
+    # 🔹NEW FEATURE 1: Config-Driven Healing Rules
+    # Incoming reviews are automatically validated and healed using configurable rules
+    # (e.g., missing text, empty text, special characters, overly long reviews)
+    # before being sent to the LLM for sentiment analysis.
     @task
     def diagnose_and_heal_batch(reviews: list[dict]):
-        healed_reviews = [_heal_review(review) for review in reviews]
-        healed_count = sum(1 for r in healed_reviews if r.get('was_healed', True))
-        logger.info(f'Healed {healed_count} out of {len(reviews)} reviews in the batch.')
-        return healed_reviews
+        # healed_reviews = [_heal_review(review) for review in reviews]
+        # healed_count = sum(1 for r in healed_reviews if r.get('was_healed', True))
+        # logger.info(f'Healed {healed_count} out of {len(reviews)} reviews in the batch.')
+        # return healed_reviews
+        return [heal_review(r, Config.MAX_TEXT_LENGTH) for r in reviews]
 
     @task
     def batch_analyze_sentiment(healed_reviews: list[dict], model_info: dict):
@@ -466,6 +494,6 @@ def self_healing_pipeline():
     analyzed_results = batch_analyze_sentiment(healed_reviews, model_info)
 
     summary = aggregate_results(analyzed_results)
-    health_report = generate_health_report(summary)
+    generate_health_report(summary)
 
 self_healing_pipeline_dag = self_healing_pipeline()
