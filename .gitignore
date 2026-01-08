@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+
+# Airflow
+airflow.db
+airflow.cfg
+logs/
+simple_auth_manager_passwords.json.generated
+
+# Data (DO NOT COMMIT LARGE FILES)
+data/
+input/
+output/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Ollama
+*.gguf
+#
