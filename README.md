@@ -28,6 +28,10 @@ Traditional data pipelines fail when they encounter malformed or unexpected data
 | Feature | Description |
 |---------|-------------|
 | **Agentic Self-Healing** | Automatically fixes missing, malformed, or invalid data |
+| **Config-Driven Healing Rules** | Healing logic defined via configuration, not hard-coded |
+| **Healing History per Record** | Tracks every healing action applied to each review |
+| **Confidence-Aware Sentiment Output** | Classifies predictions into HIGH / MEDIUM / LOW confidence |
+| **LLM Abstraction Layer** | Decouples sentiment analysis logic from the underlying LLM |
 | **Local LLM** | Uses Ollama with LLaMA 3.2 - no external API calls |
 | **Batch Processing** | Configurable batch sizes with offset support |
 | **Parallel Execution** | Scale with multiple concurrent DAG runs |
@@ -46,6 +50,29 @@ The pipeline automatically detects and heals the following data quality issues:
 | `wrong_type` | Text is not a string | Type conversion |
 | `special_characters_only` | No alphanumeric characters | Replace with marker |
 | `too_long` | Exceeds max length (2000 chars) | Truncate with ellipsis |
+
+## Advanced Agentic Capabilities
+
+## 1. Config-Driven Healing Rules
+Healing logic is fully configuration-driven, allowing new data quality rules to be added or modified without changing DAG code. This makes the pipeline adaptable to evolving data contracts.
+
+## 2. Healing History per Record
+Each processed record maintains a detailed healing trace, including:
+- Detected error type
+- Healing action applied
+- Timestamp of correction  
+This improves auditability, debugging, and observability.
+
+## 3. Confidence-Aware Sentiment Output
+In addition to sentiment labels, the pipeline assigns confidence bands:
+- **HIGH** (≥ 0.85)
+- **MEDIUM** (0.65–0.84)
+- **LOW** (< 0.65)
+
+This enables downstream systems to make risk-aware decisions.
+
+## 4. LLM Abstraction Layer
+Sentiment analysis is implemented via an abstraction layer, allowing the underlying LLM backend to be swapped (e.g., Ollama today, other providers in the future) without impacting pipeline logic.
 
 ## Prerequisites
 
@@ -244,12 +271,51 @@ output/
 }
 ```
 
+### Record-Level Output (inside `results`)
+Each entry in the `results` array represents a processed review with enhanced observability:
+
+```json
+{
+  "review_id": "abc123",
+  "text": "Great service and food!",
+  "original_text": "Great service and food!!!!!!!!",
+  "predicted_sentiment": "POSITIVE",
+  "confidence": 0.91,
+  "confidence_level": "HIGH",
+  "status": "healed",
+  "healing_applied": true,
+  "healing_action": "truncated_text",
+  "error_type": "too_long",
+  "healing_history": [
+    {
+      "error_type": "too_long",
+      "action": "truncated_text",
+      "timestamp": "2025-12-08T14:30:00"
+    }
+  ],
+  "metadata": {
+    "user_id": "u123",
+    "date": "2015-03-05",
+    "useful": 2,
+    "funny": 0,
+    "cool": 1
+  }
+}
+```
+
 ## Project Structure
 
 ```
 ResilientSentimentPipeline/
 ├── dags/
-│   └── agentic_pipeline_dag.py    # Main DAG definition
+│     ├── agentic_pipeline_dag.py    # Main DAG definition
+      └── init.py
+├── core/
+      ├── healing_engine.py        # Config-driven healing logic
+      ├── sentiment_engine.py      # LLM abstraction layer
+      ├── response_parser.py       # Robust LLM response parsing
+      ├── confidence_utils.py      # Confidence band computation
+      └── init.py
 ├── scripts/
 │   └── batch_runner.py            # Batch processing script
 ├── input/                         # Input data directory
